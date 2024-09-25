@@ -1,0 +1,186 @@
+#define BLYNK_TEMPLATE_ID "TMPL3uDmWihjd"    // Replace with your Blynk Template ID
+#define BLYNK_TEMPLATE_NAME "CO2R744"        // Replace with your Blynk Template Name
+#define BLYNK_AUTH_TOKEN "8y2VkLjQLxyY6_6UCsNrkAYtASpIQTV3" // Replace with your Blynk Auth Token
+
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <BlynkSimpleEsp8266.h>
+#include <Wire.h>
+#include <LiquidCrystal_PCF8574.h>
+#include <FS.h> // Include FS library for SPIFFS
+#include <math.h>
+
+// Wi-Fi credentials
+const char* ssid = "POCO M6 Pro 5G";
+const char* password = "11111111";
+
+// Initialize Blynk with the auth token
+BlynkTimer timer;
+
+// Web server setup
+ESP8266WebServer server(80);
+
+// LCD setup (for I2C interface, address may vary)
+LiquidCrystal_PCF8574 lcd(0x27);  // Adjust the address if necessary
+
+// Calibration constants for CO2 measurement
+const float RLOAD = 10.0;  // Load resistance (kOhm)
+const float RZERO = 76.63; // Resistance in fresh air (kOhm)
+const float PARA = 116.6020682; // Constant for CO2
+const float PARB = 2.769034857; // Constant for CO2
+
+float co2ppm = 0.0;  // Global variable to store CO2 level
+
+// Function prototypes
+void handleRoot();
+void handleData();
+void sendSensorData();
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize SPIFFS
+  if (!SPIFFS.begin()) {
+    Serial.println("SPIFFS Mount Failed");
+    return;
+  }
+  Serial.println("SPIFFS Mounted Successfully");
+
+  // Initialize LCD
+  lcd.begin(16, 2);
+  lcd.setBacklight(255);
+  lcd.print("Initializing...");
+
+  delay(2000);
+
+  lcd.clear();
+  lcd.print("CO2 Monitor");
+  delay(2000);
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Connected to Wi-Fi");
+  Serial.println("IP Address: " + WiFi.localIP().toString());
+
+  // Connect to Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, password); // Initialize Blynk with auth token
+
+  // Define the web server routes
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+
+  // Start the web server
+  server.begin();
+
+  // Setup a timer to send sensor data to Blynk and update LCD every second
+  timer.setInterval(1000L, sendSensorData); // Adjust the interval as needed
+}
+
+void loop() {
+  Blynk.run();  // Run Blynk
+  timer.run();  // Run timer to send data to Blynk and update LCD
+  server.handleClient();  // Handle web server requests
+}
+
+// Function to handle requests to the root path (Web page)
+void handleRoot() {
+  String html = "<!DOCTYPE html>";
+  html += "<html lang='en'>";
+  html += "<head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<title>CO2 Monitoring</title>";
+  html += "<style>";
+  html += "body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f0f0f0; }";
+  html += ".container { max-width: 600px; margin: 50px auto; padding: 20px; border: 2px solid #007BFF; border-radius: 10px; background-color: #ffffff; box-shadow: 0 0 10px rgba(0, 0, 0, 0.1); }";
+  html += "h1 { color: #007BFF; text-align: center; }";
+  html += "#co2-display { font-size: 30px; font-weight: bold; color: #333; text-align: center; margin: 20px 0; }";
+  html += "#co2-status { font-size: 20px; color: #333; text-align: center; }";
+  html += "#co2-alert { display: none; color: red; font-weight: bold; text-align: center; margin-top: 20px; }";
+  html += "@media (max-width: 600px) {";
+  html += "  .container { padding: 10px; }";
+  html += "  #co2-display { font-size: 24px; }";
+  html += "  #co2-status { font-size: 18px; }";
+  html += "}";
+  html += "</style>";
+  html += "<script>";
+  html += "async function fetchCO2Level() {";
+  html += "  const response = await fetch('/data');";
+  html += "  const data = await response.json();";
+  html += "  return data.value;";
+  html += "}";
+  html += "async function updateCO2Display() {";
+  html += "  const co2Level = await fetchCO2Level();";
+  html += "  const co2Display = document.getElementById('co2-display');";
+  html += "  const statusMessage = document.getElementById('co2-status');";
+  html += "  const alertBox = document.getElementById('co2-alert');";
+  html += "  co2Display.textContent = co2Level + ' ppm';";
+  html += "  if (co2Level > 1000) {";
+  html += "    statusMessage.textContent = 'Status: High CO2 Level';";
+  html += "    alertBox.style.display = 'block';";
+  html += "  } else {";
+  html += "    statusMessage.textContent = 'Status: Normal';";
+  html += "    alertBox.style.display = 'none';";
+  html += "  }";
+  html += "}";
+  html += "setInterval(updateCO2Display, 1000);"; // Update every second
+  html += "updateCO2Display();";
+  html += "</script>";
+  html += "</head><body>";
+  html += "<div class='container'>";
+  html += "<h1>CO2 Emission Monitoring</h1>";
+  html += "<div id='co2-display'>Fetching data...</div>";
+  html += "<p id='co2-status'>Status: Loading...</p>";
+  html += "<div id='co2-alert'>Alert: CO2 level is above 1000 ppm! Increase ventilation immediately!</div>";
+  html += "</div>";
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+// Function to handle requests to the /data path
+void handleData() {
+  String json = "{\"value\":\"" + String(co2ppm, 2) + "\"}";
+  server.send(200, "application/json", json);
+}
+
+// Function to read sensor data and send to Blynk and display on LCD
+void sendSensorData() {
+  // Read the analog value from the MQ135 sensor
+  int mq135Value = analogRead(A0);
+
+  // Convert the analog value to resistance
+  float sensorResistance = ((1023.0 / (float)mq135Value) - 1.0) * RLOAD;
+
+  // Calculate the ppm of CO2 using the sensor resistance
+  float ratio = sensorResistance / RZERO;
+  co2ppm = PARA * pow(ratio, -PARB);
+
+  // Limit CO2 value between 0 and 10000 ppm
+  co2ppm = constrain(co2ppm, 0.0, 10000.0);
+
+  // Serial output for verification
+  Serial.print("Analog Value: ");
+  Serial.println(mq135Value);
+  Serial.print("Sensor Resistance: ");
+  Serial.print(sensorResistance);
+  Serial.println(" kOhm");
+  Serial.print("CO2 Level: ");
+  Serial.print(co2ppm, 2);  // Print with 2 decimal places
+  Serial.println(" ppm");
+
+  // Send CO2 level to Blynk dashboard
+  Blynk.virtualWrite(V1, co2ppm);
+
+  // Display CO2 level on LCD with "ppm"
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("CO2 Level: ");
+  lcd.setCursor(0, 1);
+  lcd.print(co2ppm, 2);  // Print with 2 decimal places
+  lcd.print(" ppm");
+}
